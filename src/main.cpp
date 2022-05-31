@@ -49,13 +49,6 @@ void setup()
     while (!Serial) { }
 #endif
 
-#ifdef CONF_DHCP
-    if (dhcpFailed) {
-        Serial.println("DHCP conf failed");
-        blockErr();
-    }
-#endif
-
     // Check for Ethernet hardware present
     if (Ethernet.hardwareStatus() == EthernetNoHardware) {
         Serial.println("Ethernet shield was not found.  Sorry, can't run without "
@@ -67,6 +60,18 @@ void setup()
         blockErr();
     }
 
+#ifdef CONF_DHCP
+    if (dhcpFailed) {
+        Serial.println("DHCP conf failed");
+        blockErr();
+    }
+#endif
+
+    Serial.print("My ip is ");
+    Ethernet.localIP().printTo(Serial);
+    Serial.println();
+    Serial.flush();
+
     // Init ntp client
     ntp::initNtp();
     setSyncProvider(ntp::getNtpTime);
@@ -74,15 +79,16 @@ void setup()
     if (timeStatus() == timeNotSet)
         Serial.println("Can't sync time");
 
-    uint64_t usec = now() * 1000000 + micros();
-    Serial.printf("%lu µs, hour = %d\n", usec, hour());
+    // TODO this should be in microseconds
+    uint64_t usec = now();
+    Serial.printf("%lu secs\n", usec);
 
     // start UDP
     Udp.begin(localPort);
 
     DefaultHeaderStruct header =
-            DefaultHeaderStruct{ now(), 0, 0, samplingRateT::SR44, 16, 0, 0 };
-    Udp.beginPacket("192.168.1.1", 8888);
+            DefaultHeaderStruct{ usec, 0, 0, samplingRateT::SR44, 16, 0, 0 };
+    Udp.beginPacket("192.168.43.240", 8888);
     Udp.write((char*) &header, sizeof(DefaultHeaderStruct));
     Udp.endPacket();
 }

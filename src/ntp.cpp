@@ -8,7 +8,7 @@ namespace ntp {
     IPAddress timeServer(151, 80, 211, 8);
     const int NTP_PACKET_SIZE = 48; // NTP time is in the first 48 bytes of message
     byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
-    const int timeZone = 1;
+    const int timeZone = 0;
 
     void initNtp() {
         Udp.begin(8889);
