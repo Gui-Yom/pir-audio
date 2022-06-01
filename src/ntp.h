@@ -4,8 +4,8 @@
 #include <TimeLib.h>
 
 namespace ntp {
-    void initNtp();
-    time_t getNtpTime();
+    void begin();
+    time_t getTime();
 }
 
 #endif //PIR_AUDIO_NTP_H

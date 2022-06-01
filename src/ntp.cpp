@@ -1,58 +1,78 @@
 #include <TimeLib.h>
 #include <NativeEthernet.h>
+#include "Ntp.h"
 
 namespace ntp {
 
+    struct NtpPacket
+    {
+        uint8_t li_vn_mode;      // Eight bits. li, vn, and mode.
+        // li.   Two bits.   Leap indicator.
+        // vn.   Three bits. Version number of the protocol.
+        // mode. Three bits. Client will pick mode 3 for client.
+
+        uint8_t stratum;         // Eight bits. Stratum level of the local clock.
+        uint8_t poll;            // Eight bits. Maximum interval between successive messages.
+        uint8_t precision;       // Eight bits. Precision of the local clock.
+
+        uint32_t rootDelay;      // 32 bits. Total round trip delay time.
+        uint32_t rootDispersion; // 32 bits. Max error aloud from primary clock source.
+        uint32_t refId;          // 32 bits. Reference clock identifier.
+
+        uint32_t refTm_s;        // 32 bits. Reference time-stamp seconds.
+        uint32_t refTm_f;        // 32 bits. Reference time-stamp fraction of a second.
+
+        uint32_t origTm_s;       // 32 bits. Originate time-stamp seconds.
+        uint32_t origTm_f;       // 32 bits. Originate time-stamp fraction of a second.
+
+        uint32_t rxTm_s;         // 32 bits. Received time-stamp seconds.
+        uint32_t rxTm_f;         // 32 bits. Received time-stamp fraction of a second.
+
+        uint32_t txTm_s;         // 32 bits and the most important field the client cares about. Transmit time-stamp seconds.
+        uint32_t txTm_f;         // 32 bits. Transmit time-stamp fraction of a second.
+    };
+
+#define NTP_PACKET_SIZE sizeof(NtpPacket)
+#define NTP_PORT 8123
+#define NTP_TZ 0
+#define NTP_TIMEOUT_MS 1500
+#define NTP_SERVER NTP_SERVER_LOCAL
+
+    IPAddress NTP_SERVER_LOCAL(192, 168, 1, 1);
+    IPAddress NTP_SERVER_0(151, 80, 211, 8);
     EthernetUDP Udp;
+    NtpPacket packet;
 
-    IPAddress timeServer(151, 80, 211, 8);
-    const int NTP_PACKET_SIZE = 48; // NTP time is in the first 48 bytes of message
-    byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
-    const int timeZone = 0;
-
-    void initNtp() {
+    void begin()
+    {
         Udp.begin(8889);
     }
 
 // send an NTP request to the time server at the given address
-    void sendNTPpacket(IPAddress &address)
+    void sendNtpReq(IPAddress &address)
     {
-        // set all bytes in the buffer to 0
-        memset(packetBuffer, 0, NTP_PACKET_SIZE);
-        // Initialize values needed to form NTP request
-        // (see URL above for details on the packets)
-        packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-        packetBuffer[1] = 0;     // Stratum, or type of clock
-        packetBuffer[2] = 6;     // Polling Interval
-        packetBuffer[3] = 0xEC;  // Peer Clock Precision
-        // 8 bytes of zero for Root Delay & Root Dispersion
-        packetBuffer[12] = 49;
-        packetBuffer[13] = 0x4E;
-        packetBuffer[14] = 49;
-        packetBuffer[15] = 52;
-        // all NTP fields have been given values, now
-        // you can send a packet requesting a timestamp:
-        Udp.beginPacket(address, 123); //NTP requests are to port 123
-        Udp.write(packetBuffer, NTP_PACKET_SIZE);
+        memset(&packet, 0, NTP_PACKET_SIZE);
+        packet.li_vn_mode = 0b11100011;
+        packet.stratum = 0;
+        packet.poll = 4;
+        packet.precision = 0xFA;
+        Udp.beginPacket(address, NTP_PORT);
+        Udp.write((char*) &packet, NTP_PACKET_SIZE);
         Udp.endPacket();
     }
 
-    time_t getNtpTime()
+    time_t getTime()
     {
         while (Udp.parsePacket() > 0); // discard any previously received packets
-        sendNTPpacket(timeServer);
+        sendNtpReq(NTP_SERVER);
         uint32_t beginWait = millis();
-        while (millis() - beginWait < 1500) {
+        while (millis() - beginWait < NTP_TIMEOUT_MS) {
             int size = Udp.parsePacket();
             if (size >= NTP_PACKET_SIZE) {
-                Udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
-                unsigned long secsSince1900;
-                // convert four bytes starting at location 40 to a long integer
-                secsSince1900 = (unsigned long) packetBuffer[40] << 24;
-                secsSince1900 |= (unsigned long) packetBuffer[41] << 16;
-                secsSince1900 |= (unsigned long) packetBuffer[42] << 8;
-                secsSince1900 |= (unsigned long) packetBuffer[43];
-                return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
+                Serial.println("Got NTP response");
+                Udp.read((char*) &packet, NTP_PACKET_SIZE);  // read packet into the buffer
+                time_t secsSince1900 = fnet_htonl(packet.txTm_s);
+                return secsSince1900 - 2208988800UL + NTP_TZ * SECS_PER_HOUR;
             }
         }
         return 0; // return 0 if unable to get the time

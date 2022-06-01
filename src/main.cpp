@@ -1,6 +1,6 @@
 #include <NativeEthernet.h>
 #include <TimeLib.h>
-#include "ntp.h"
+#include "Ntp.h"
 #include "PacketHeader.h"
 
 // Enter a MAC address and IP address for your controller below.
@@ -9,16 +9,16 @@ byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xE0 };
 IPAddress ip(192, 168, 1, 2);
 //IPAddress gateway(192, 168, 1, 1);
 
-unsigned int localPort = 8888; // local port to listen on
+unsigned int localPort = 8888;
 
 // buffers for receiving and sending data
-char packetBuffer[UDP_TX_PACKET_MAX_SIZE]; // buffer to hold incoming packet,
+char packetBuffer[UDP_TX_PACKET_MAX_SIZE];
 
 // An EthernetUDP instance to let us send and receive packets over UDP
 EthernetUDP Udp;
 
-#define CONF_DHCP
-//#define CONF_MANUAL
+//#define CONF_DHCP
+#define CONF_MANUAL
 
 #define WAIT_FOR_SERIAL
 
@@ -73,8 +73,8 @@ void setup()
     Serial.flush();
 
     // Init ntp client
-    ntp::initNtp();
-    setSyncProvider(ntp::getNtpTime);
+    ntp::begin();
+    setSyncProvider(ntp::getTime);
 
     if (timeStatus() == timeNotSet)
         Serial.println("Can't sync time");
