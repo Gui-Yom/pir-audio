@@ -21,7 +21,7 @@ enum samplingRateT
     UNDEF  ///< Undefined
 };
 
-struct DefaultHeaderStruct
+struct JacktripPacketHeader
 {
 public:
     uint64_t TimeStamp;    ///< Time Stamp

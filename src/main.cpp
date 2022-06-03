@@ -2,17 +2,13 @@
 #include <TimeLib.h>
 #include "Ntp.h"
 #include "PacketHeader.h"
+#include "Audio.h"
 
 // Enter a MAC address and IP address for your controller below.
 // The IP address will be dependent on your local network:
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xE0 };
 IPAddress ip(192, 168, 1, 2);
 //IPAddress gateway(192, 168, 1, 1);
-
-unsigned int localPort = 8888;
-
-// buffers for receiving and sending data
-char packetBuffer[UDP_TX_PACKET_MAX_SIZE];
 
 // An EthernetUDP instance to let us send and receive packets over UDP
 EthernetUDP Udp;
@@ -28,6 +24,10 @@ void blockErr()
         delay(1);
     }
 }
+
+uint16_t remotePort;
+
+AudioControlSGTL5000 audioShield;
 
 void setup()
 {
@@ -83,43 +83,61 @@ void setup()
     uint64_t usec = now();
     Serial.printf("%lu secs\n", usec);
 
-    // start UDP
-    Udp.begin(localPort);
+    EthernetClient c = EthernetClient();
+    c.connect(IPAddress(192, 168, 1, 1), 4464);
 
-    DefaultHeaderStruct header =
-            DefaultHeaderStruct{ usec, 0, 0, samplingRateT::SR44, 16, 0, 0 };
-    Udp.beginPacket("192.168.43.240", 8888);
-    Udp.write((char*) &header, sizeof(DefaultHeaderStruct));
-    Udp.endPacket();
+    uint8_t buf[4] = { 0xB8, 0x22, 0, 0 };
+    c.write(buf, 4);
+
+    while (c.available() < 4) {
+
+    }
+
+    int size = c.read(buf, 4);
+    Serial.printf("read %d bytes\n", size);
+    remotePort = (buf[1] << 8) + buf[0];
+    Serial.printf("Remote port is %d\n", remotePort);
+
+    // start UDP
+    Udp.begin(8888);
+
+    AudioMemory(2);
+    audioShield.enable();
+    audioShield.volume(0.4);
 }
+
+#define SAMPLES_SIZE 512
+#define BUFFER_SIZE (16 + SAMPLES_SIZE * 2)
+
+uint32_t last_send = 0;
+uint8_t buffer[BUFFER_SIZE];
+uint16_t seq = 0;
+
+AudioOutputI2S out;
+AudioPlayQueue q;
+AudioConnection conn(q, 0, out, 0);
 
 void loop()
 {
-    // if there's data available, read a packet
-    int packetSize = Udp.parsePacket();
-    if (packetSize) {
-        Serial.print("Received packet of size ");
-        Serial.println(packetSize);
-        Serial.print("From ");
-        IPAddress remote = Udp.remoteIP();
-        for (int i = 0; i < 4; i++) {
-            Serial.print(remote[i], DEC);
-            if (i < 3) {
-                Serial.print(".");
-            }
-        }
-        Serial.print(", port ");
-        Serial.println(Udp.remotePort());
-
-        // read the packet into packetBufffer
-        Udp.read(packetBuffer, UDP_TX_PACKET_MAX_SIZE);
-        Serial.println(packetBuffer);
-
-        // send a reply to the IP address and port that sent us the packet we
-        // received
-        Udp.beginPacket(Udp.remoteIP(), Udp.remotePort());
-        Udp.write(packetBuffer, packetSize);
+    if (millis() - last_send > 500) {
+        JacktripPacketHeader header =
+                JacktripPacketHeader{ seq, seq, SAMPLES_SIZE, samplingRateT::SR44, 16, 1, 1 };
+        Udp.beginPacket("192.168.1.1", remotePort);
+        memcpy(buffer, &header, sizeof(JacktripPacketHeader));
+        Udp.write(buffer, BUFFER_SIZE);
         Udp.endPacket();
+
+        last_send = millis();
+        seq += 1;
     }
-    delay(10);
+    int size = 0;
+    if ((size = Udp.parsePacket())) {
+        if (size == 63) {
+            Serial.println("Received exit packet");
+            blockErr();
+        }
+        Udp.read(buffer, BUFFER_SIZE);
+        q.play((const int16_t*) (buffer + 16), 512);
+        Serial.println("Received packet");
+    }
 }
