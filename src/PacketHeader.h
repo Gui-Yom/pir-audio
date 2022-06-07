@@ -35,4 +35,6 @@ public:
             NumOutgoingChannelsToNet; ///< Number of outgoing Channels to the network
 };
 
+#define PACKET_HEADER_SIZE sizeof(JacktripPacketHeader)
+
 #endif //PIR_AUDIO_PACKETHEADER_H
