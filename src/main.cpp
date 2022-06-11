@@ -1,15 +1,18 @@
 #include <NativeEthernet.h>
-#include <TimeLib.h>
 #include "PacketHeader.h"
-#include "Audio.h"
+#include <Audio.h>
+#include <OSCBundle.h>
 
-#define WAIT_INFINITE while (true) yield();
+//region Network parameters
 
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xE0 };
 // For manual ip address configuration
 IPAddress ip(192, 168, 1, 2);
+// Remote server ip address
 IPAddress peerAddress(192, 168, 1, 1);
+// Remote server tcp port
 const uint16_t REMOTE_TCP_PORT = 4464;
+// Local udp port to receive packets on
 const uint16_t LOCAL_UDP_PORT = 8888;
 
 // Set this to use the ip address from the dhcp
@@ -20,14 +23,36 @@ const uint16_t LOCAL_UDP_PORT = 8888;
 // Set this to wait for a serial connection before proceeding with the execution
 #define WAIT_FOR_SERIAL
 
+//endregion
+
 // The UDP socket we use
 EthernetUDP Udp;
 
 // UDP remote port to send audio packets to
 uint16_t remote_udp_port;
 
+// Audio shield driver
 AudioControlSGTL5000 audioShield;
+// Audio circular buffer
 AudioPlayQueue q;
+
+#define WAIT_INFINITE while (true) yield();
+
+// Open a tcp connection to exchange the udp ports with the server
+void queryJacktripUdpPort()
+{
+    EthernetClient c = EthernetClient();
+    c.connect(peerAddress, REMOTE_TCP_PORT);
+
+    uint32_t port = LOCAL_UDP_PORT;
+    c.write((const uint8_t*) &port, 4);
+
+    while (c.available() < 4) { }
+    c.read((uint8_t*) &port, 4);
+    remote_udp_port = port;
+    Serial.printf("Remote port is %d\n", remote_udp_port);
+    c.close();
+}
 
 void setup()
 {
@@ -63,7 +88,7 @@ void setup()
 #ifdef CONF_DHCP
     if (dhcpFailed) {
         Serial.println("DHCP conf failed");
-        blockErr();
+        WAIT_INFINITE
     }
 #endif
 
@@ -79,21 +104,11 @@ void setup()
     if (timeStatus() == timeNotSet)
         Serial.println("Can't sync time");
 
-    // TODO this should be in microseconds
     uint64_t usec = now();
     Serial.printf("%lu secs\n", usec);
      */
 
-    EthernetClient c = EthernetClient();
-    c.connect(peerAddress, REMOTE_TCP_PORT);
-
-    uint32_t port = LOCAL_UDP_PORT;
-    c.write((const uint8_t*) &port, 4);
-
-    while (c.available() < 4) { }
-    c.read((uint8_t*) &port, 4);
-    remote_udp_port = port;
-    Serial.printf("Remote port is %d\n", remote_udp_port);
+    queryJacktripUdpPort();
 
     // start UDP
     Udp.begin(LOCAL_UDP_PORT);
@@ -116,36 +131,6 @@ uint16_t seq = 0;
 AudioOutputI2S out;
 AudioConnection conn0(q, 0, out, 0);
 
-void sendAudioKeepalive();
-
-void loop()
-{
-    if (millis() - last_send > 500) {
-        // Periodically tell the jacktrip server that we are still alive, so it still sends us data.
-        sendAudioKeepalive();
-    }
-
-    int size;
-    if ((size = Udp.parsePacket())) {
-        if (size == 63) { // Exit sequence
-            // TODO verify that the packet is actually full of ones (not very important)
-
-            Serial.println("Received exit packet");
-            Serial.println("Audio memory statistics");
-            Serial.printf("  maxmem: %d blocks\n", AudioMemoryUsageMax());
-            Serial.printf("  maxcpu: %f %%\n", AudioProcessorUsageMax() * 100);
-
-            WAIT_INFINITE
-        } else if (size != BUFFER_SIZE) {
-            Serial.println("Received a malformed packet");
-        } else {
-            Udp.read(buffer, BUFFER_SIZE);
-            q.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), SAMPLES_SIZE);
-            //Serial.println("Received packet");
-        }
-    }
-}
-
 void sendAudioKeepalive()
 {
     JacktripPacketHeader header =
@@ -159,3 +144,37 @@ void sendAudioKeepalive()
     last_send = millis();
     seq += 1;
 };
+
+void loop()
+{
+    // TODO read osc parameters
+
+    // TODO transmit audio
+    // TODO filter audio before transmitting
+    if (millis() - last_send > 500) {
+        // Periodically tell the jacktrip server that we are still alive, so it still sends us data.
+        sendAudioKeepalive();
+    }
+
+    int size;
+    // This is nonblocking
+    if ((size = Udp.parsePacket())) {
+        if (size == 63) { // Exit sequence
+            // TODO verify that the packet is actually full of ones (not very important)
+
+            Serial.println("Received exit packet");
+            Serial.println("Audio memory statistics");
+            Serial.printf("  maxmem: %d blocks\n", AudioMemoryUsageMax());
+            Serial.printf("  maxcpu: %f %%\n", AudioProcessorUsageMax() * 100);
+
+            // TODO we should add a restart strategy with a wakeup packet or something
+            WAIT_INFINITE
+        } else if (size != BUFFER_SIZE) {
+            Serial.println("Received a malformed packet");
+        } else {
+            Udp.read(buffer, BUFFER_SIZE);
+            q.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), SAMPLES_SIZE);
+            //Serial.println("Received packet");
+        }
+    }
+}
