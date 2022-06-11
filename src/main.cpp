@@ -25,6 +25,11 @@ const uint16_t LOCAL_UDP_PORT = 8888;
 
 //endregion
 
+//region Audio parameters
+#define NUM_CHANNELS 2
+#define NUM_SAMPLES 128
+//endregion
+
 // The UDP socket we use
 EthernetUDP Udp;
 
@@ -34,7 +39,8 @@ uint16_t remote_udp_port;
 // Audio shield driver
 AudioControlSGTL5000 audioShield;
 // Audio circular buffer
-AudioPlayQueue q;
+AudioPlayQueue qL;
+AudioPlayQueue qR;
 
 #define WAIT_INFINITE while (true) yield();
 
@@ -113,28 +119,40 @@ void setup()
     // start UDP
     Udp.begin(LOCAL_UDP_PORT);
 
-    const uint8_t NUM_BUFFERS = 6;
+    // Number of buffers per channel
+    const uint8_t NUM_BUFFERS = NUM_SAMPLES / 128 + 1;
 
-    AudioMemory(NUM_BUFFERS + 2);
+    AudioMemory(NUM_BUFFERS * NUM_CHANNELS + 2);
+    Serial.printf("Allocated %d buffers\n", NUM_BUFFERS * NUM_CHANNELS + 2);
     audioShield.enable();
     audioShield.volume(0.5);
-    q.setMaxBuffers(NUM_BUFFERS);
+    qL.setMaxBuffers(NUM_BUFFERS);
+    qR.setMaxBuffers(NUM_BUFFERS);
 }
 
-#define SAMPLES_SIZE 512
-#define BUFFER_SIZE (PACKET_HEADER_SIZE + SAMPLES_SIZE * 2)
+#define BUFFER_SIZE (PACKET_HEADER_SIZE + NUM_CHANNELS * NUM_SAMPLES * 2)
 
 uint32_t last_send = 0;
+// Packet buffer (in/out)
 uint8_t buffer[BUFFER_SIZE];
 uint16_t seq = 0;
 
+//region Audio system links
 AudioOutputI2S out;
-AudioConnection conn0(q, 0, out, 0);
+AudioConnection connL(qL, 0, out, 0);
+AudioConnection connR(qR, 0, out, 1);
+//endregion
 
 void sendAudioKeepalive()
 {
-    JacktripPacketHeader header =
-            JacktripPacketHeader{ seq, seq, SAMPLES_SIZE, samplingRateT::SR44, 16, 1, 1 };
+    JacktripPacketHeader header = JacktripPacketHeader{
+            seq,
+            seq,
+            NUM_SAMPLES * NUM_CHANNELS,
+            samplingRateT::SR44,
+            16,
+            NUM_CHANNELS,
+            NUM_CHANNELS };
     Udp.beginPacket(peerAddress, remote_udp_port);
     memset(buffer, 0, BUFFER_SIZE);
     memcpy(buffer, &header, sizeof(JacktripPacketHeader));
@@ -157,13 +175,13 @@ void loop()
     }
 
     int size;
-    // This is nonblocking
+    // Nonblocking
     if ((size = Udp.parsePacket())) {
         if (size == 63) { // Exit sequence
             // TODO verify that the packet is actually full of ones (not very important)
 
             Serial.println("Received exit packet");
-            Serial.println("Audio memory statistics");
+            Serial.println("Perf statistics");
             Serial.printf("  maxmem: %d blocks\n", AudioMemoryUsageMax());
             Serial.printf("  maxcpu: %f %%\n", AudioProcessorUsageMax() * 100);
 
@@ -173,7 +191,14 @@ void loop()
             Serial.println("Received a malformed packet");
         } else {
             Udp.read(buffer, BUFFER_SIZE);
-            q.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), SAMPLES_SIZE);
+            int remaining = qL.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), NUM_SAMPLES);
+            if (remaining > 0) {
+                Serial.printf("%d samples dropped (L)", remaining);
+            }
+            remaining = qR.play((const int16_t*) (buffer + PACKET_HEADER_SIZE + NUM_SAMPLES * 2), NUM_SAMPLES);
+            if (remaining > 0) {
+                Serial.printf("%d samples dropped (R)", remaining);
+            }
             //Serial.println("Received packet");
         }
     }
