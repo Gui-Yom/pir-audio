@@ -15,7 +15,15 @@ pio run -t upload
 
 ### Build options
 
-The fields and defines at the start of `main.cpp` are options which may be useful to tinker with (e.g. DHCP or manual ip configuration).
+The fields and defines at the start of `main.cpp` are options which may be useful to tinker with (e.g. DHCP or manual ip
+configuration).
+
+## Running
+
+After uploading to the teensy, the program will wait for a serial connection (if the `WAIT_FOR_SERIAL` define is set).
+Start a jacktrip server with `jacktrip -S -q 2 -p 2`, and add another client
+with `jacktrip -C 127.0.0.1 -B 4465 -q 2 -n 1`. Then you can open a serial connection to the device and the program will
+resume (`pio device monitor`).
 
 ## Notes
 
