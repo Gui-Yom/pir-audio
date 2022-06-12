@@ -26,8 +26,11 @@ const uint16_t LOCAL_UDP_PORT = 8888;
 //endregion
 
 //region Audio parameters
-#define NUM_CHANNELS 2
-#define NUM_SAMPLES 128
+#define NUM_CHANNELS 1
+// 128 is 22% cpu usage in stereo mode
+// 256 is 24% cpu usage
+// 512 is 24% cpu usage (mono)
+#define NUM_SAMPLES 512
 //endregion
 
 // The UDP socket we use
@@ -57,7 +60,6 @@ void queryJacktripUdpPort()
     c.read((uint8_t*) &port, 4);
     remote_udp_port = port;
     Serial.printf("Remote port is %d\n", remote_udp_port);
-    c.close();
 }
 
 void setup()
@@ -120,7 +122,7 @@ void setup()
     Udp.begin(LOCAL_UDP_PORT);
 
     // Number of buffers per channel
-    const uint8_t NUM_BUFFERS = NUM_SAMPLES / 128 + 1;
+    const uint8_t NUM_BUFFERS = NUM_SAMPLES / AUDIO_BLOCK_SAMPLES;
 
     AudioMemory(NUM_BUFFERS * NUM_CHANNELS + 2);
     Serial.printf("Allocated %d buffers\n", NUM_BUFFERS * NUM_CHANNELS + 2);
@@ -128,11 +130,15 @@ void setup()
     audioShield.volume(0.5);
     qL.setMaxBuffers(NUM_BUFFERS);
     qR.setMaxBuffers(NUM_BUFFERS);
+
+    AudioProcessorUsageMaxReset();
+    AudioMemoryUsageMaxReset();
 }
 
 #define BUFFER_SIZE (PACKET_HEADER_SIZE + NUM_CHANNELS * NUM_SAMPLES * 2)
 
 uint32_t last_send = 0;
+uint32_t last_receive = millis();
 // Packet buffer (in/out)
 uint8_t buffer[BUFFER_SIZE];
 uint16_t seq = 0;
@@ -148,7 +154,7 @@ void sendAudioKeepalive()
     JacktripPacketHeader header = JacktripPacketHeader{
             seq,
             seq,
-            NUM_SAMPLES * NUM_CHANNELS,
+            NUM_SAMPLES,
             samplingRateT::SR44,
             16,
             NUM_CHANNELS,
@@ -177,6 +183,7 @@ void loop()
     int size;
     // Nonblocking
     if ((size = Udp.parsePacket())) {
+        last_receive = millis();
         if (size == 63) { // Exit sequence
             // TODO verify that the packet is actually full of ones (not very important)
 
@@ -190,16 +197,22 @@ void loop()
         } else if (size != BUFFER_SIZE) {
             Serial.println("Received a malformed packet");
         } else {
+            //Serial.println("Received packet");
             Udp.read(buffer, BUFFER_SIZE);
-            int remaining = qL.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), NUM_SAMPLES);
+            uint32_t remaining = qL.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), NUM_SAMPLES);
             if (remaining > 0) {
                 Serial.printf("%d samples dropped (L)", remaining);
             }
+            /*
             remaining = qR.play((const int16_t*) (buffer + PACKET_HEADER_SIZE + NUM_SAMPLES * 2), NUM_SAMPLES);
             if (remaining > 0) {
                 Serial.printf("%d samples dropped (R)", remaining);
-            }
-            //Serial.println("Received packet");
+            }*/
         }
+    }
+
+    if (millis() - last_receive > 1000) {
+        Serial.println("We have not received anything for 1 second");
+        last_receive = millis();
     }
 }
