@@ -26,11 +26,9 @@ const uint16_t LOCAL_UDP_PORT = 8888;
 //endregion
 
 //region Audio parameters
-const uint8_t NUM_CHANNELS = 1;
-// 128 is 22% cpu usage in stereo mode
-// 256 is 24% cpu usage
-// 512 is 24% cpu usage (mono)
-const uint16_t NUM_SAMPLES = 512;
+const uint8_t NUM_CHANNELS = 2;
+// Can't use 2 channels and 512 samples due to a bug in the udp implementation (can't send packets bigger than 2048)
+const uint16_t NUM_SAMPLES = 256;
 // Number of buffers per channel
 const uint8_t NUM_BUFFERS = NUM_SAMPLES / AUDIO_BLOCK_SAMPLES;
 //endregion
@@ -51,11 +49,13 @@ AudioInputI2S in;
 AudioPlayQueue pql;
 AudioPlayQueue pqr;
 AudioRecordQueue rql;
+AudioRecordQueue rqr;
 
 // Audio system connections
 AudioConnection outL(pql, 0, out, 0);
 AudioConnection outR(pqr, 0, out, 1);
 AudioConnection inL(in, 0, rql, 0);
+AudioConnection inR(in, 1, rqr, 0);
 //endregion
 
 // Shorthand to block and do nothing
@@ -84,6 +84,7 @@ const uint32_t PERF_REPORT_DELAY = 3000;
 
 void setup()
 {
+    Ethernet.setSocketNum(4);
     if (BUFFER_SIZE > FNET_SOCKET_DEFAULT_SIZE) {
         Ethernet.setSocketSize(BUFFER_SIZE);
     }
@@ -159,10 +160,10 @@ void setup()
     Udp.begin(LOCAL_UDP_PORT);
 
     // + 10 for the audio input
-    AudioMemory(NUM_BUFFERS * NUM_CHANNELS + 2 + 10);
+    AudioMemory(NUM_BUFFERS * NUM_CHANNELS + 2 + 20);
     pql.setMaxBuffers(NUM_BUFFERS);
     pqr.setMaxBuffers(NUM_BUFFERS);
-    Serial.printf("Allocated %d buffers\n", NUM_BUFFERS * NUM_CHANNELS + 2 + 10);
+    Serial.printf("Allocated %d buffers\n", NUM_BUFFERS * NUM_CHANNELS + 2 + 20);
 
     audioShield.enable();
     audioShield.volume(0.5);
@@ -170,10 +171,13 @@ void setup()
     audioShield.inputSelect(AUDIO_INPUT_MIC);
     //audioShield.headphoneSelect(AUDIO_HEADPHONE_DAC);
 
+    rql.begin();
+    if (NUM_CHANNELS > 1) {
+        rqr.begin();
+    }
+
     AudioProcessorUsageMaxReset();
     AudioMemoryUsageMaxReset();
-
-    rql.begin();
 }
 
 void loop()
@@ -182,22 +186,30 @@ void loop()
     // TODO filter audio before transmitting
 
     // Send audio when we have enough samples to fill a packet
-    while (rql.available() >= NUM_BUFFERS) {
+    while (rql.available() >= NUM_BUFFERS &&
+           (NUM_CHANNELS == 1 || (NUM_CHANNELS > 1 && rqr.available() >= NUM_BUFFERS))) {
         HEADER.TimeStamp = seq;
         HEADER.SeqNumber = seq;
-        HEADER.NumIncomingChannelsFromNet = NUM_CHANNELS;
-        HEADER.NumOutgoingChannelsToNet = NUM_CHANNELS;
         memcpy(buffer, &HEADER, PACKET_HEADER_SIZE);
+        uint8_t* pos = buffer + PACKET_HEADER_SIZE;
         for (int i = 0; i < NUM_BUFFERS; i++) {
-            memcpy(buffer + PACKET_HEADER_SIZE + i * AUDIO_BLOCK_SAMPLES * 2, rql.readBuffer(),
+            memcpy(pos, rql.readBuffer(),
                    AUDIO_BLOCK_SAMPLES * 2);
             rql.freeBuffer();
+            pos += AUDIO_BLOCK_SAMPLES * 2;
+        }
+        if (NUM_CHANNELS > 1) {
+            for (int i = 0; i < NUM_BUFFERS; i++) {
+                memcpy(pos, rqr.readBuffer(), AUDIO_BLOCK_SAMPLES * 2);
+                rqr.freeBuffer();
+                pos += AUDIO_BLOCK_SAMPLES * 2;
+            }
         }
 
         Udp.beginPacket(peerAddress, remote_udp_port);
         size_t written = Udp.write(buffer, BUFFER_SIZE);
         if (written != BUFFER_SIZE) {
-            Serial.println("Can't write data");
+            Serial.println("Net buffer is too small");
         }
         Udp.endPacket();
 
@@ -223,6 +235,7 @@ void loop()
 
             // TODO we should add a restart strategy with a wakeup packet or something
             rql.end();
+            rqr.end();
             audioShield.disable();
             WAIT_INFINITE()
         } else if (size != BUFFER_SIZE) {
@@ -235,11 +248,12 @@ void loop()
             if (remaining > 0) {
                 Serial.printf("%d samples dropped (L)", remaining);
             }
-            /*
-            remaining = pqr.play((const int16_t*) (buffer + PACKET_HEADER_SIZE + NUM_SAMPLES * 2), NUM_SAMPLES);
-            if (remaining > 0) {
-                Serial.printf("%d samples dropped (R)", remaining);
-            }*/
+            if (NUM_CHANNELS > 1) {
+                remaining = pqr.play((const int16_t*) (buffer + PACKET_HEADER_SIZE + NUM_SAMPLES * 2), NUM_SAMPLES);
+                if (remaining > 0) {
+                    Serial.printf("%d samples dropped (R)", remaining);
+                }
+            }
         }
     }
 
