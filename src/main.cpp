@@ -26,11 +26,13 @@ const uint16_t LOCAL_UDP_PORT = 8888;
 //endregion
 
 //region Audio parameters
-#define NUM_CHANNELS 1
+const uint8_t NUM_CHANNELS = 1;
 // 128 is 22% cpu usage in stereo mode
 // 256 is 24% cpu usage
 // 512 is 24% cpu usage (mono)
-#define NUM_SAMPLES 512
+const uint16_t NUM_SAMPLES = 512;
+// Number of buffers per channel
+const uint8_t NUM_BUFFERS = NUM_SAMPLES / AUDIO_BLOCK_SAMPLES;
 //endregion
 
 // The UDP socket we use
@@ -39,31 +41,52 @@ EthernetUDP Udp;
 // UDP remote port to send audio packets to
 uint16_t remote_udp_port;
 
+//region Audio system objects
 // Audio shield driver
 AudioControlSGTL5000 audioShield;
-// Audio circular buffer
-AudioPlayQueue qL;
-AudioPlayQueue qR;
+AudioOutputI2S out;
+AudioInputI2S in;
 
-#define WAIT_INFINITE while (true) yield();
+// Audio circular buffers
+AudioPlayQueue pql;
+AudioPlayQueue pqr;
+AudioRecordQueue rql;
 
-// Open a tcp connection to exchange the udp ports with the server
-void queryJacktripUdpPort()
-{
-    EthernetClient c = EthernetClient();
-    c.connect(peerAddress, REMOTE_TCP_PORT);
+// Audio system connections
+AudioConnection outL(pql, 0, out, 0);
+AudioConnection outR(pqr, 0, out, 1);
+AudioConnection inL(in, 0, rql, 0);
+//endregion
 
-    uint32_t port = LOCAL_UDP_PORT;
-    c.write((const uint8_t*) &port, 4);
+// Shorthand to block and do nothing
+#define WAIT_INFINITE() while (true) yield();
 
-    while (c.available() < 4) { }
-    c.read((uint8_t*) &port, 4);
-    remote_udp_port = port;
-    Serial.printf("Remote port is %d\n", remote_udp_port);
-}
+// Size of the jacktrip packets
+const uint32_t BUFFER_SIZE = PACKET_HEADER_SIZE + NUM_CHANNELS * NUM_SAMPLES * 2;
+// Packet buffer (in/out)
+uint8_t buffer[BUFFER_SIZE];
+
+uint16_t seq = 0;
+JacktripPacketHeader HEADER = JacktripPacketHeader{
+        0,
+        0,
+        NUM_SAMPLES,
+        samplingRateT::SR44,
+        16,
+        NUM_CHANNELS,
+        NUM_CHANNELS };
+
+//region Warning params
+uint32_t last_receive = millis();
+uint32_t last_perf_report = millis();
+const uint32_t PERF_REPORT_DELAY = 3000;
+//endregion
 
 void setup()
 {
+    if (BUFFER_SIZE > FNET_SOCKET_DEFAULT_SIZE) {
+        Ethernet.setSocketSize(BUFFER_SIZE);
+    }
 #ifdef CONF_DHCP
     bool dhcpFailed = false;
     // start the Ethernet
@@ -86,11 +109,11 @@ void setup()
     if (Ethernet.hardwareStatus() == EthernetNoHardware) {
         Serial.println("Ethernet shield was not found.  Sorry, can't run without "
                        "hardware. :(");
-        WAIT_INFINITE
+        WAIT_INFINITE()
     }
     if (Ethernet.linkStatus() == LinkOFF) {
         Serial.println("Ethernet cable is not connected.");
-        WAIT_INFINITE
+        WAIT_INFINITE()
     }
 
 #ifdef CONF_DHCP
@@ -104,7 +127,10 @@ void setup()
     Ethernet.localIP().printTo(Serial);
     Serial.println();
 
+    Serial.printf("Packet size is %d bytes\n", BUFFER_SIZE);
+
     // Init ntp client
+    // audio packets timestamps don't seem to be necessary
     /*
     ntp::begin();
     setSyncProvider(ntp::getTime);
@@ -116,68 +142,71 @@ void setup()
     Serial.printf("%lu secs\n", usec);
      */
 
-    queryJacktripUdpPort();
+    // Query jacktrip udp port
+    EthernetClient c = EthernetClient();
+    c.connect(peerAddress, REMOTE_TCP_PORT);
+
+    uint32_t port = LOCAL_UDP_PORT;
+    // port is sent little endian
+    c.write((const uint8_t*) &port, 4);
+
+    while (c.available() < 4) { }
+    c.read((uint8_t*) &port, 4);
+    remote_udp_port = port;
+    Serial.printf("Remote port is %d\n", remote_udp_port);
 
     // start UDP
     Udp.begin(LOCAL_UDP_PORT);
 
-    // Number of buffers per channel
-    const uint8_t NUM_BUFFERS = NUM_SAMPLES / AUDIO_BLOCK_SAMPLES;
+    // + 10 for the audio input
+    AudioMemory(NUM_BUFFERS * NUM_CHANNELS + 2 + 10);
+    pql.setMaxBuffers(NUM_BUFFERS);
+    pqr.setMaxBuffers(NUM_BUFFERS);
+    Serial.printf("Allocated %d buffers\n", NUM_BUFFERS * NUM_CHANNELS + 2 + 10);
 
-    AudioMemory(NUM_BUFFERS * NUM_CHANNELS + 2);
-    Serial.printf("Allocated %d buffers\n", NUM_BUFFERS * NUM_CHANNELS + 2);
     audioShield.enable();
     audioShield.volume(0.5);
-    qL.setMaxBuffers(NUM_BUFFERS);
-    qR.setMaxBuffers(NUM_BUFFERS);
+    audioShield.micGain(20);
+    audioShield.inputSelect(AUDIO_INPUT_MIC);
+    //audioShield.headphoneSelect(AUDIO_HEADPHONE_DAC);
 
     AudioProcessorUsageMaxReset();
     AudioMemoryUsageMaxReset();
+
+    rql.begin();
 }
-
-#define BUFFER_SIZE (PACKET_HEADER_SIZE + NUM_CHANNELS * NUM_SAMPLES * 2)
-
-uint32_t last_send = 0;
-uint32_t last_receive = millis();
-// Packet buffer (in/out)
-uint8_t buffer[BUFFER_SIZE];
-uint16_t seq = 0;
-
-//region Audio system links
-AudioOutputI2S out;
-AudioConnection connL(qL, 0, out, 0);
-AudioConnection connR(qR, 0, out, 1);
-//endregion
-
-void sendAudioKeepalive()
-{
-    JacktripPacketHeader header = JacktripPacketHeader{
-            seq,
-            seq,
-            NUM_SAMPLES,
-            samplingRateT::SR44,
-            16,
-            NUM_CHANNELS,
-            NUM_CHANNELS };
-    Udp.beginPacket(peerAddress, remote_udp_port);
-    memset(buffer, 0, BUFFER_SIZE);
-    memcpy(buffer, &header, sizeof(JacktripPacketHeader));
-    Udp.write(buffer, BUFFER_SIZE);
-    Udp.endPacket();
-
-    last_send = millis();
-    seq += 1;
-};
 
 void loop()
 {
     // TODO read osc parameters
-
-    // TODO transmit audio
     // TODO filter audio before transmitting
-    if (millis() - last_send > 500) {
-        // Periodically tell the jacktrip server that we are still alive, so it still sends us data.
-        sendAudioKeepalive();
+
+    // Send audio when we have enough samples to fill a packet
+    while (rql.available() >= NUM_BUFFERS) {
+        HEADER.TimeStamp = seq;
+        HEADER.SeqNumber = seq;
+        HEADER.NumIncomingChannelsFromNet = NUM_CHANNELS;
+        HEADER.NumOutgoingChannelsToNet = NUM_CHANNELS;
+        memcpy(buffer, &HEADER, PACKET_HEADER_SIZE);
+        for (int i = 0; i < NUM_BUFFERS; i++) {
+            memcpy(buffer + PACKET_HEADER_SIZE + i * AUDIO_BLOCK_SAMPLES * 2, rql.readBuffer(),
+                   AUDIO_BLOCK_SAMPLES * 2);
+            rql.freeBuffer();
+        }
+
+        Udp.beginPacket(peerAddress, remote_udp_port);
+        size_t written = Udp.write(buffer, BUFFER_SIZE);
+        if (written != BUFFER_SIZE) {
+            Serial.println("Can't write data");
+        }
+        Udp.endPacket();
+
+        /*
+        if (rql.available() > 0) {
+            Serial.printf("Running late behind (%d buffers)\n", rql.available());
+        }*/
+
+        seq += 1;
     }
 
     int size;
@@ -193,18 +222,21 @@ void loop()
             Serial.printf("  maxcpu: %f %%\n", AudioProcessorUsageMax() * 100);
 
             // TODO we should add a restart strategy with a wakeup packet or something
-            WAIT_INFINITE
+            rql.end();
+            audioShield.disable();
+            WAIT_INFINITE()
         } else if (size != BUFFER_SIZE) {
             Serial.println("Received a malformed packet");
         } else {
+            // We received an audio packet
             //Serial.println("Received packet");
             Udp.read(buffer, BUFFER_SIZE);
-            uint32_t remaining = qL.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), NUM_SAMPLES);
+            uint32_t remaining = pql.play((const int16_t*) (buffer + PACKET_HEADER_SIZE), NUM_SAMPLES);
             if (remaining > 0) {
                 Serial.printf("%d samples dropped (L)", remaining);
             }
             /*
-            remaining = qR.play((const int16_t*) (buffer + PACKET_HEADER_SIZE + NUM_SAMPLES * 2), NUM_SAMPLES);
+            remaining = pqr.play((const int16_t*) (buffer + PACKET_HEADER_SIZE + NUM_SAMPLES * 2), NUM_SAMPLES);
             if (remaining > 0) {
                 Serial.printf("%d samples dropped (R)", remaining);
             }*/
@@ -214,5 +246,10 @@ void loop()
     if (millis() - last_receive > 1000) {
         Serial.println("We have not received anything for 1 second");
         last_receive = millis();
+    }
+
+    if (millis() - last_perf_report > PERF_REPORT_DELAY) {
+        Serial.printf("Perf report : %d, %f %%\n", AudioMemoryUsage(), AudioProcessorUsage() * 100);
+        last_perf_report = millis();
     }
 }
